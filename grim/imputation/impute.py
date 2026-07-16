@@ -1593,7 +1593,13 @@ class Imputation(object):
         if self.nodes_for_plan_A:
             geno_type = self.input_type(chr["Genotype"][0])
             if not geno_type in self.nodes_for_plan_A:
-                return None, None
+                # Not a plan-A input type. It may still be imputable via plan B if
+                # the graph carries partial haplotypes for this locus combination
+                # (e.g. a 2-locus A+B record -> label "12"). Only give up when
+                # plan B can't support the combination either.
+                planb_label = "".join(str(loc) for loc in sorted(geno_type))
+                if planb_label not in self.netGraph.nodes_plan_b:
+                    return None, None
 
         n_loci = chr["N_Loc"]
 
