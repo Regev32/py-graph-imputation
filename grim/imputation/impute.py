@@ -955,7 +955,7 @@ class Imputation(object):
                                 if hap_list[0][i].split("*", 1)[0] == gen:
                                     count = count + 1
                             if count > 0:
-                                _list.append(name)
+                                _list.append(str(name))
                         # we'll get all the options possible
                         # (query,lc)=self.cypher.buildQuery(["~".join(_list)])
 
@@ -1592,6 +1592,7 @@ class Imputation(object):
         # if we in 9-loci, check if the type input in valid format
         if self.nodes_for_plan_A:
             geno_type = self.input_type(chr["Genotype"][0])
+            geno_type.sort()
             if not geno_type in self.nodes_for_plan_A:
                 # Not a plan-A input type. It may still be imputable via plan B if
                 # the graph carries partial haplotypes for this locus combination

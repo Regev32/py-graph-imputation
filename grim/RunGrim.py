@@ -7,6 +7,7 @@ from grim.grim import graph_freqs
 from grim.grim import impute
 from filter_top_3 import change_donor_file
 from filter_by_rest import change_output_by_extra_gl
+from .imputation.impute import Imputation
 
 
 def remove_empty_rows(file_path):
@@ -71,6 +72,36 @@ def run_original_grim(
             for line in lines:
                 file.write(line)
         file.close()
+
+
+class Impute_for_em(object):
+
+    def __init__(self,  config=None, graph = None, count_by_prob=None,):
+        self.imputation = Imputation(graph, config, count_by_prob)
+
+    def impute_for_em(self, config, planb, em_mr, em=True, dominant3=True):
+        if dominant3:
+            path_donor = config["imputation_input_file"]
+            gls, lines = change_donor_file(path_donor)  # change so wont change donor file
+
+        # imputation
+        self.imputation.impute_file(config, planb, True, em)
+
+        # change the output and filter by the extra_gl
+        if dominant3:
+            path_pmug = os.path.join(config["imputation_out_hap_freq_file"])
+            path_pmug_pops = os.path.join(config["imputation_out_hap_pops_file"])
+            path_miss = os.path.join(config["imputation_out_miss_file"])
+
+            change_output_by_extra_gl(
+                config, gls, path_pmug, None, None, path_pmug_pops, path_miss
+            )  # filter results in our original file, add miss to existing miss
+
+            # changing to original donor file
+            with open(path_donor, "w") as file:
+                for line in lines:
+                    file.write(line)
+            file.close()
 
 
 if __name__ == "__main__":
