@@ -28,6 +28,7 @@ from .imputation.networkx_graph import Graph
 
 import sys
 import os
+import pickle as pkl
 
 # adding Folder_2 to the system path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)).replace("/grim", ""))
@@ -54,7 +55,7 @@ def graph_freqs(conf_file="", for_em=False, em_pop=None):
     )
 
 
-def impute(conf_file="", hap_pop_pair=False, graph=None):
+def impute(conf_file="", hap_pop_pair=False):
     project_dir_in_file, project_dir_graph = "", ""
     if conf_file == "":
         conf_file = (
@@ -68,10 +69,18 @@ def impute(conf_file="", hap_pop_pair=False, graph=None):
         project_dir_in_file = (
             os.path.dirname(os.path.realpath(__file__)).replace("/grim", "") + "/"
         )
-    graph = run_impute(
-        conf_file, project_dir_graph, project_dir_in_file, hap_pop_pair, graph
-    )
-    return graph
+    with open(conf_file, "r") as c:
+        import json
+
+        conf = json.load(c)
+
+    graph = None
+    graph_path = conf["graph_path"]
+    if os.path.exists(graph_path):
+        with open(graph_path, "rb") as fin:
+            graph = pkl.load(fin)
+
+    run_impute(conf_file, project_dir_graph, project_dir_in_file, hap_pop_pair, graph)
 
 
 def impute_instance(config, graph, count_by_prob=None):

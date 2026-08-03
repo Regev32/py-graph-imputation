@@ -5,6 +5,7 @@ import pathlib
 import sys
 import os
 from pathlib import Path
+import pickle as pkl
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -126,6 +127,7 @@ def run_impute(
         "nodes_for_plan_A": json_conf.get("Plan_A_Matrix", []),
         "save_mode": json_conf.get("save_space_mode", False),
         "UNK_priors": json_conf.get("UNK_priors", "MR"),
+        "graph_path": json_conf.get("graph_path", "graph.pkl"),
     }
 
     # Display the configurations we are using
@@ -164,6 +166,7 @@ def run_impute(
     print("\tOutput Miss Filename: {}".format(config["imputation_out_miss_file"]))
     print("\tOutput Problem Filename: {}".format(config["imputation_out_problem_file"]))
     print("\tFactor Missing Data: {}".format(config["factor_missing_data"]))
+    print("\tDonors Graph Path: {}".format(config["graph_path"]))
     print("\tLoci Map: {}".format(config["loci_map"]))
     print("\tPlan B Matrix: {}".format(config["matrix_planb"]))
     print("\tPops Count File: {}".format(config["pops_count_file"]))
@@ -191,11 +194,14 @@ def run_impute(
 
     config["full_loci"] = "".join(sorted(all_loci_set))
     # Perform imputation
-    if graph == None:
+    if graph is None:
         graph = Graph(config)
         graph.build_graph(
             config["node_file"], config["top_links_file"], config["edges_file"]
         )
+        with open(config["graph_path"], "wb") as fout:
+            pkl.dump(graph, fout)
+
     imputation = Imputation(graph, config)
 
     # Create output directory if it doesn't exist
