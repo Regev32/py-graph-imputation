@@ -19,8 +19,18 @@ def remove_empty_rows(file_path):
 
 
 def run_original_grim(
-    path_configuration, hap_pop_pair=True, Producehpf=False, dominant3=True
+    path_configuration,
+    hap_pop_pair=True,
+    Producehpf=False,
+    dominant3=True,
+    processes=None,
 ):
+    """Run the whole GRIM pipeline off `path_configuration`.
+
+    `processes` is how many subjects to impute at a time - 1 for a single
+    process, 0 for one worker per core. Whatever the count, the workers all
+    impute against the same graph, which is built once here.
+    """
     with open(path_configuration, "r") as f:
         config = json.load(f)
 
@@ -43,7 +53,11 @@ def run_original_grim(
         gls, lines = change_donor_file(path_donor)  # change so wont change donor file
 
     # imputation
-    impute(conf_file=path_configuration, hap_pop_pair=hap_pop_pair)
+    impute(
+        conf_file=path_configuration,
+        hap_pop_pair=hap_pop_pair,
+        processes=processes,
+    )
 
     # change the output and filter by the extra_gl
     if dominant3:

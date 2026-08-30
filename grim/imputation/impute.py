@@ -1,9 +1,12 @@
 import copy
+import gc
 import logging
 import math
+import multiprocessing
 import operator
 import timeit
-from collections import defaultdict
+from collections import defaultdict, deque, namedtuple
+import os
 import os.path
 import json
 
@@ -116,6 +119,152 @@ def clean_up_gl(gl):
     for miss in unknowns:
         locus_gl.remove(miss)
     return "^".join(locus_gl)
+
+
+# The graph is by far the biggest thing this module touches, so the workers must
+# share the one the parent already built instead of each holding a copy. That is
+# what the module level state below is for: the parent publishes the `Imputation`
+# instance here and only then forks, and every worker inherits it - graph
+# included - as copy-on-write memory. Nothing about the graph is ever pickled, so
+# the number of cores is what limits how many workers are worth starting, not the
+# amount of RAM.
+_worker_imputation = None
+_worker_impute_args = None
+
+SubjectTask = namedtuple(
+    "SubjectTask", ("index", "subject_id", "gl", "binary", "race1", "race2", "line")
+)
+
+SubjectResult = namedtuple(
+    "SubjectResult",
+    (
+        "index",
+        "subject_id",
+        "line",
+        "res_muugs",
+        "res_haps",
+        "plan",
+        "option_1",
+        "option_2",
+        "time_taken",
+        "failed",
+    ),
+)
+
+OutputWriters = namedtuple(
+    "OutputWriters",
+    ("hap_muug", "pop_muug", "hap_haplo", "pop_haplo", "miss", "problem"),
+)
+
+
+def publish_worker_state(imputation, impute_args):
+    """Make `imputation` the instance the workers impute with.
+
+    Must be called before the pool is created - the workers pick this up by
+    inheriting the module's globals across the fork, not through pickling.
+    """
+    global _worker_imputation, _worker_impute_args
+    _worker_imputation = imputation
+    _worker_impute_args = impute_args
+
+
+def impute_one_subject(task):
+    """Impute a single subject with the shared `Imputation` instance.
+
+    Runs in the parent when imputing sequentially and in a forked worker when
+    imputing in parallel; either way the graph it reads is the one the parent
+    built. The per subject counters are read back off the result because in
+    parallel mode the parent's own counters are never touched.
+    """
+    imputation = _worker_imputation
+    priority, epsilon, n, MUUG_output, haps_output, planb, em = _worker_impute_args
+
+    imputation.plan = "a"
+    imputation.option_1 = 0
+    imputation.option_2 = 0
+
+    start = timeit.default_timer()
+    res_muugs = res_haps = None
+    failed = False
+    try:
+        _, res_muugs, res_haps = imputation.impute_one(
+            task.subject_id,
+            task.gl,
+            task.binary,
+            task.race1,
+            task.race2,
+            priority,
+            epsilon,
+            n,
+            MUUG_output,
+            haps_output,
+            planb,
+            em,
+        )
+    except Exception:
+        failed = True
+
+    return SubjectResult(
+        index=task.index,
+        subject_id=task.subject_id,
+        line=task.line,
+        res_muugs=res_muugs,
+        res_haps=res_haps,
+        plan=imputation.plan,
+        option_1=imputation.option_1,
+        option_2=imputation.option_2,
+        time_taken=timeit.default_timer() - start,
+        failed=failed,
+    )
+
+
+def process_count(processes):
+    """Resolve the configured number of processes to an actual worker count.
+
+    0 (or less) means "one worker per core"; 1 means no pool at all.
+    """
+    if processes is None:
+        return 1
+    processes = int(processes)
+    if processes <= 0:
+        return os.cpu_count() or 1
+    return processes
+
+
+def fork_pool(processes):
+    """Open a pool of `processes` workers that share this process' graph.
+
+    Returns None if the platform cannot fork, leaving the caller to impute in a
+    single process: the other start methods would send each worker a pickled
+    copy of the graph, which is the memory blow-up this exists to avoid.
+    """
+    if "fork" not in multiprocessing.get_all_start_methods():
+        print(
+            "Cannot fork on this platform - imputing in a single process instead.",
+            flush=True,
+        )
+        return None
+    # Collecting writes to the header of every object it walks, which would copy
+    # the shared graph into each worker a page at a time. Freezing moves what is
+    # alive now - the graph included - to a generation the collector leaves alone.
+    gc.freeze()
+    return multiprocessing.get_context("fork").Pool(processes=processes)
+
+
+def imap_bounded(pool, func, iterable, max_in_flight):
+    """`pool.imap` with a cap on how many tasks may be in flight at once.
+
+    Results still arrive in input order, but at most `max_in_flight` of them are
+    held in memory, so one slow subject cannot make the parent buffer the
+    results of the whole run behind it.
+    """
+    in_flight = deque()
+    for item in iterable:
+        in_flight.append(pool.apply_async(func, (item,)))
+        if len(in_flight) >= max_in_flight:
+            yield in_flight.popleft().get()
+    while in_flight:
+        yield in_flight.popleft().get()
 
 
 class Imputation(object):
@@ -1989,174 +2138,261 @@ class Imputation(object):
 
         return subject_id, res_muugs, res_haps
 
-    def impute_file(self, config, planb=None, em_mr=False, em=False):  ##em
+    def subject_tasks(self, lines, f_bin, f_bin_exist, problem):
+        """Turn the input file into one `SubjectTask` per subject.
+
+        Runs in the parent, so the tasks handed to the workers are nothing but a
+        handful of small strings - the graph they are imputed against is already
+        in every worker.
+        """
+        for i, name_gl in enumerate(lines):
+            name_gl = name_gl.rstrip()  # remove trailing whitespace
+            subject_id = "?"
+            try:
+                if "," in name_gl:
+                    list_gl = name_gl.split(",")
+                else:
+                    list_gl = name_gl.split("%")
+
+                subject_id = list_gl[0]
+                subject_gl = list_gl[1]
+                subject_bin = [1] * (len(self.full_loci) - 1)
+                if f_bin_exist:
+                    subject_bin = f_bin[subject_id]
+                race1 = race2 = None
+                if len(list_gl) > 2:
+                    race1 = list_gl[2]
+                    race2 = list_gl[3]
+            except Exception:
+                print(f"{i} Subject: {subject_id} - Exception")
+                problem.write(str(name_gl) + "\n")
+                continue
+
+            yield SubjectTask(
+                index=i,
+                subject_id=subject_id,
+                gl=subject_gl,
+                binary=subject_bin,
+                race1=race1,
+                race2=race2,
+                line=name_gl,
+            )
+
+    def write_subject_result(self, result, writers, config, em_mr):
+        """Write one subject's imputation out to the result files."""
+        MUUG_output = config["output_MUUG"]
+        haps_output = config["output_haplotypes"]
+        number_of_results = config["number_of_results"]
+        number_of_pop_results = config["number_of_pop_results"]
+
+        i = result.index
+        subject_id = result.subject_id
+        res_muugs = result.res_muugs
+        res_haps = result.res_haps
+
+        if res_muugs is None:
+            writers.problem.write(str(i) + "," + str(subject_id) + "\n")
+            return
+
+        if (len(res_haps["Haps"]) == 0 or res_haps["Haps"] == "NaN") and len(
+            res_muugs["Haps"]
+        ) == 0:
+            writers.miss.write(str(i) + "," + str(subject_id) + "\n")
+
+        if haps_output:
+            haps = res_haps["Haps"]
+            probs = res_haps["Probs"]
+            pops = res_haps["Pops"]
+            print(
+                "{index} Subject: {id} {hap_length} haplotypes".format(
+                    index=i, id=subject_id, hap_length=len(haps)
+                )
+            )
+            if em_mr:
+                write_best_hap_race_pairs(
+                    subject_id,
+                    haps,
+                    pops,
+                    probs,
+                    number_of_results,
+                    writers.hap_haplo,
+                )
+                write_best_prob(subject_id, pops, probs, 1, writers.pop_haplo)
+            else:
+                write_best_prob(
+                    subject_id,
+                    haps,
+                    probs,
+                    number_of_results,
+                    writers.hap_haplo,
+                    "+",
+                )
+                write_best_prob(
+                    subject_id,
+                    pops,
+                    probs,
+                    number_of_pop_results,
+                    writers.pop_haplo,
+                )
+        if MUUG_output:
+            haps = res_muugs["Haps"]
+            pops = res_muugs["Pops"]
+            print(
+                "{index} Subject: {id} {hap_length} haplotypes".format(
+                    index=i, id=subject_id, hap_length=len(haps)
+                )
+            )
+            write_best_prob_genotype(
+                subject_id, haps, number_of_results, writers.hap_muug
+            )
+            write_best_prob_genotype(
+                subject_id, pops, number_of_pop_results, writers.pop_muug
+            )
+
+        if self.verbose:
+            self.logger.info(
+                "{index} Subject: {id} {hap_length} haplotypes".format(
+                    index=i, id=subject_id, hap_length=len(haps)
+                )
+            )
+            self.logger.info(
+                "{index} Subject: {id} plan: {plan} oppen_phases - count of open regular option: {option1}, count of alternative opening: {option2}".format(
+                    index=i,
+                    id=subject_id,
+                    plan=result.plan,
+                    option1=result.option_1,
+                    option2=result.option_2,
+                )
+            )
+
+    def impute_file(
+        self, config, planb=None, em_mr=False, em=False, processes=None
+    ):  ##em
+        """Impute every subject in the input file.
+
+        `processes` is how many subjects to impute at a time: 1 keeps everything
+        in this process, more than 1 forks that many workers off this one, and 0
+        forks one per core. The workers all impute against the graph this
+        process already holds, so adding workers costs cores rather than memory.
+        """
         priority = config["priority"]
         MUUG_output = config["output_MUUG"]
         haps_output = config["output_haplotypes"]
         n = 1000
         epsilon = config["epsilon"]
-        number_of_results = config["number_of_results"]
-        number_of_pop_results = config["number_of_pop_results"]
         # planb = config["planb"]#em
         if planb is None:  # em
             planb = config["planb"]  # em
+        if processes is None:
+            processes = config.get("processes", 1)
+        processes = process_count(processes)
 
         # TODO: do the right thing if its a gzip
         if self.verbose:
             self.logger.info("Starting Imputation!")
 
-        f_bin_exist = False
-        if os.path.isfile(config["bin_imputation_input_file"]):
-            with open(config["bin_imputation_input_file"]) as json_file:
-                f_bin = json.load(json_file)
-                f_bin_exist = True
+        # Has to happen before the fork below: this is how the workers get hold
+        # of the graph without anyone pickling it.
+        publish_worker_state(
+            self, (priority, epsilon, n, MUUG_output, haps_output, planb, em)
+        )
 
-        f = open(config["imputation_input_file"], "r")
+        # Fork the workers before any output file is opened, so that no worker
+        # ends up holding a handle on a file the parent is writing.
+        pool = None
+        if processes > 1:
+            pool = fork_pool(processes)
+            if pool is None:
+                processes = 1
+            else:
+                print(
+                    "Imputing with {procs} worker processes sharing one graph "
+                    "(parent PID {pid})".format(procs=processes, pid=os.getpid()),
+                    flush=True,
+                )
+        forked = pool is not None
 
-        if MUUG_output:
-            fout_hap_muug = open(config["imputation_out_umug_freq_file"], "w")
-            fout_pop_muug = open(config["imputation_out_umug_pops_file"], "w")
-        if haps_output:
-            fout_hap_haplo = open(config["imputation_out_hap_freq_file"], "w")
-            fout_pop_haplo = open(config["imputation_out_hap_pops_file"], "w")
+        f = None
+        fout_hap_muug = fout_pop_muug = fout_hap_haplo = fout_pop_haplo = None
+        miss = problem = None
+        try:
+            f_bin = None
+            f_bin_exist = False
+            if os.path.isfile(config["bin_imputation_input_file"]):
+                with open(config["bin_imputation_input_file"]) as json_file:
+                    f_bin = json.load(json_file)
+                    f_bin_exist = True
 
-        miss = open(config["imputation_out_miss_file"], "w")
-        problem = open(config["imputation_out_problem_file"], "w")
+            f = open(config["imputation_input_file"], "r")
 
-        with f as lines:
-            for i, name_gl in enumerate(lines):
+            if MUUG_output:
+                fout_hap_muug = open(config["imputation_out_umug_freq_file"], "w")
+                fout_pop_muug = open(config["imputation_out_umug_pops_file"], "w")
+            if haps_output:
+                fout_hap_haplo = open(config["imputation_out_hap_freq_file"], "w")
+                fout_pop_haplo = open(config["imputation_out_hap_pops_file"], "w")
+
+            miss = open(config["imputation_out_miss_file"], "w")
+            problem = open(config["imputation_out_problem_file"], "w")
+
+            writers = OutputWriters(
+                hap_muug=fout_hap_muug,
+                pop_muug=fout_pop_muug,
+                hap_haplo=fout_hap_haplo,
+                pop_haplo=fout_pop_haplo,
+                miss=miss,
+                problem=problem,
+            )
+
+            tasks = self.subject_tasks(f, f_bin, f_bin_exist, problem)
+            if pool is None:
+                results = map(impute_one_subject, tasks)
+            else:
+                # Keep a few subjects queued per worker: enough that no worker
+                # ever waits on the parent, few enough that the results waiting
+                # to be written stay a handful instead of the whole file.
+                results = imap_bounded(pool, impute_one_subject, tasks, 4 * processes)
+
+            for result in results:
+                if result.failed:
+                    print(f"{result.index} Subject: {result.subject_id} - Exception")
+                    problem.write(str(result.line) + "\n")
+                    continue
                 try:
-                    name_gl = name_gl.rstrip()  # remove trailing whitespace
-                    if "," in name_gl:
-                        list_gl = name_gl.split(",")
-                    else:
-                        list_gl = name_gl.split("%")
-
-                    subject_id = list_gl[0]
-                    subject_gl = list_gl[1]
-                    subject_bin = [1] * (len(self.full_loci) - 1)
-                    if f_bin_exist:
-                        subject_bin = f_bin[subject_id]
-                    race1 = race2 = None
-                    if len(list_gl) > 2:
-                        race1 = list_gl[2]
-                        race2 = list_gl[3]
-
-                    start = timeit.default_timer()
-
-                    #
-                    # Impute One
-                    # This method will impute one subject given the parameters
-                    self.plan = "a"
-                    self.option_1 = 0
-                    self.option_2 = 0
-                    subject_id, res_muugs, res_haps = self.impute_one(
-                        subject_id,
-                        subject_gl,
-                        subject_bin,
-                        race1,
-                        race2,
-                        priority,
-                        epsilon,
-                        n,
-                        MUUG_output,
-                        haps_output,
-                        planb,
-                        em,
-                    )  # em
-
-                    if res_muugs is None:
-                        problem.write(str(i) + "," + str(subject_id) + "\n")
-                        continue
-
-                    if (
-                        len(res_haps["Haps"]) == 0 or res_haps["Haps"] == "NaN"
-                    ) and len(res_muugs["Haps"]) == 0:
-                        miss.write(str(i) + "," + str(subject_id) + "\n")
-
-                    if haps_output:
-                        haps = res_haps["Haps"]
-                        probs = res_haps["Probs"]
-                        pops = res_haps["Pops"]
-                        print(
-                            "{index} Subject: {id} {hap_length} haplotypes".format(
-                                index=i, id=subject_id, hap_length=len(haps)
-                            )
-                        )
-                        if em_mr:
-                            write_best_hap_race_pairs(
-                                subject_id,
-                                haps,
-                                pops,
-                                probs,
-                                number_of_results,
-                                fout_hap_haplo,
-                            )
-                            write_best_prob(subject_id, pops, probs, 1, fout_pop_haplo)
-                        else:
-                            write_best_prob(
-                                subject_id,
-                                haps,
-                                probs,
-                                number_of_results,
-                                fout_hap_haplo,
-                                "+",
-                            )
-                            write_best_prob(
-                                subject_id,
-                                pops,
-                                probs,
-                                number_of_pop_results,
-                                fout_pop_haplo,
-                            )
-                    if MUUG_output:
-                        haps = res_muugs["Haps"]
-                        pops = res_muugs["Pops"]
-                        print(
-                            "{index} Subject: {id} {hap_length} haplotypes".format(
-                                index=i, id=subject_id, hap_length=len(haps)
-                            )
-                        )
-                        write_best_prob_genotype(
-                            subject_id, haps, number_of_results, fout_hap_muug
-                        )
-                        write_best_prob_genotype(
-                            subject_id, pops, number_of_pop_results, fout_pop_muug
-                        )
-
-                    if self.verbose:
-                        self.logger.info(
-                            "{index} Subject: {id} {hap_length} haplotypes".format(
-                                index=i, id=subject_id, hap_length=len(haps)
-                            )
-                        )
-                        self.logger.info(
-                            "{index} Subject: {id} plan: {plan} oppen_phases - count of open regular option: {option1}, count of alternative opening: {option2}".format(
-                                index=i,
-                                id=subject_id,
-                                plan=self.plan,
-                                option1=self.option_1,
-                                option2=self.option_2,
-                            )
-                        )
-
-                    stop = timeit.default_timer()
-                    time_taken = stop - start
-                    print(time_taken)
-                    if self.verbose:
-                        self.logger.info("Time taken: " + str(time_taken))
-                except:
-                    print(f"{i} Subject: {subject_id} - Exception")
-                    problem.write(str(name_gl) + "\n")
+                    self.write_subject_result(result, writers, config, em_mr)
+                except Exception:
+                    print(f"{result.index} Subject: {result.subject_id} - Exception")
+                    problem.write(str(result.line) + "\n")
                     continue
 
-            f.close()
-            if MUUG_output:
-                fout_hap_muug.close()
-                fout_pop_muug.close()
-            if haps_output:
-                fout_hap_haplo.close()
-                fout_pop_haplo.close()
+                time_taken = result.time_taken
+                print(time_taken)
+                if self.verbose:
+                    self.logger.info("Time taken: " + str(time_taken))
+        except BaseException:
+            # Do not wait on the subjects still being imputed on the way out.
+            if pool is not None:
+                pool.terminate()
+                pool.join()
+                pool = None
+            raise
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+            if forked:
+                gc.unfreeze()
+            # Nothing should keep the graph alive once the run is over.
+            publish_worker_state(None, None)
 
-            miss.close()
-            problem.close()
+            for handle in (
+                f,
+                fout_hap_muug,
+                fout_pop_muug,
+                fout_hap_haplo,
+                fout_pop_haplo,
+                miss,
+                problem,
+            ):
+                if handle is not None:
+                    handle.close()

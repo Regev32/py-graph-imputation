@@ -55,7 +55,7 @@ def graph_freqs(conf_file="", for_em=False, em_pop=None):
     )
 
 
-def impute(conf_file="", hap_pop_pair=False):
+def impute(conf_file="", hap_pop_pair=False, processes=None):
     project_dir_in_file, project_dir_graph = "", ""
     if conf_file == "":
         conf_file = (
@@ -75,12 +75,19 @@ def impute(conf_file="", hap_pop_pair=False):
         conf = json.load(c)
 
     graph = None
-    graph_path = conf["graph_path"]
+    graph_path = conf.get("graph_path", "graph.pkl")
     if os.path.exists(graph_path):
         with open(graph_path, "rb") as fin:
             graph = pkl.load(fin)
 
-    run_impute(conf_file, project_dir_graph, project_dir_in_file, hap_pop_pair, graph)
+    run_impute(
+        conf_file,
+        project_dir_graph,
+        project_dir_in_file,
+        hap_pop_pair,
+        graph,
+        processes,
+    )
 
 
 def impute_instance(config, graph, count_by_prob=None):

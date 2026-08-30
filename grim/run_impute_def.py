@@ -45,6 +45,7 @@ def run_impute(
     project_dir_in_file="",
     hap_pop_pair=False,
     graph=None,
+    processes=None,
 ):
     configuration_file = conf_file
 
@@ -128,6 +129,11 @@ def run_impute(
         "save_mode": json_conf.get("save_space_mode", False),
         "UNK_priors": json_conf.get("UNK_priors", "MR"),
         "graph_path": json_conf.get("graph_path", "graph.pkl"),
+        # How many subjects to impute at a time. The workers share this
+        # process' graph, so this is a question of cores, not of memory.
+        "processes": (
+            processes if processes is not None else json_conf.get("processes", 1)
+        ),
     }
 
     # Display the configurations we are using
@@ -184,6 +190,7 @@ def run_impute(
     if config["nodes_for_plan_A"]:
         print("\tNodes in plan A: {}".format(config["nodes_for_plan_A"]))
     print("\tSave space mode: {}".format(config["save_mode"]))
+    print("\tProcesses: {}".format(config["processes"]))
     print(
         "****************************************************************************************************"
     )
