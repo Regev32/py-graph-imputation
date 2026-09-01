@@ -4,6 +4,7 @@
 * [Graph Imputation](#graph-imputation)
 * [Development](#develop)
 * [Running A Minimal Example Imputation](#running-a-minimal-configuration-example)
+* [Running A 9-Locus Example Imputation](#running-a-9-locus-example)
 
 ### Graph Imputation
 
@@ -262,3 +263,63 @@ The format of the `.pops` files is (csv):
 * pop2
 * frequency
 * rank
+
+
+### Running a 9-locus example
+
+The minimal example above is 5-locus (`A`, `B`, `C`, `DQB1`, `DRB1`). The same
+pipeline runs at 9 loci; only the configuration and the data change.
+
+From the main directory of the repo run:
+```
+scripts/build-imputation-validation.sh conf/9-loci-configuration.json
+```
+
+The execution is driven by `conf/9-loci-configuration.json`, which differs from
+the minimal configuration in four places:
+
+* `loci_map` carries nine indexes instead of five. `DRB3`, `DRB4` and `DRB5`
+  all map to index `9`, because a haplotype carries at most one of them - they
+  are one locus that goes under three names. Nothing else in the pipeline needs
+  to know: `full_loci` is derived from the distinct *values*, and every lookup
+  is by locus name.
+* Loci are numbered alphabetically, as in the 5-locus map. That is not
+  cosmetic - `gl2haps` sorts each subject's alleles by name, so the index order
+  has to match the alphabetical order for the two to line up.
+* `Plan_B_Matrix` breaks the haplotype at the two recombination boundaries that
+  matter at 9 loci: class I (`1,2,3`), DP (`4,5`) and DQ/DR (`6,7,8,9`).
+* `save_space_mode` is on, which is what it is there for.
+
+It takes input from this file:
+```
+data/subjects/donor9.csv
+```
+
+which holds four subjects, each covering a different path through the code:
+
+| Subject | Typing | Exercises |
+| --- | --- | --- |
+| `D1` | all 9 loci | plan A, unambiguous |
+| `D2` | all 9 loci, one `DPB1` ambiguity | plan A, ambiguity resolution |
+| `D3` | 5 loci (`A`, `B`, `C`, `DQB1`, `DRB1`) | imputing the 4 missing loci |
+| `D4` | all 9 loci, allele combination absent from the graph | plan B fallback |
+
+And generates an `output/9loci` directory with the same contents as the
+5-locus example (`don.umug`, `don.pmug`, their `.pops` files, `don.miss` and
+`don.problem`).
+
+#### Frequency data
+
+`data/freqs_9loci/CAU.freqs.gz` is **illustrative, not a reference dataset**.
+It is built from the 5-locus CAU sample by filling in the four extra loci from
+their known linkage - DRB3/4/5 and `DQA1` follow `DRB1` and `DQB1`, and DP is
+spread over a few common `DPA1~DPB1` haplotypes. Regenerate it with:
+
+```
+python scripts/make_9loci_example_freqs.py
+```
+
+Haplotypes whose `DRB1` carries no second DRB locus at all (`DRB1*01`, `*08`,
+`*10`) are left out rather than modelled with a null placeholder, so that every
+line in the file has exactly nine loci.
+
