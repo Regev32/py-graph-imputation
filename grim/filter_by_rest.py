@@ -277,7 +277,7 @@ def change_output_by_extra_gl(
     number_of_results = config["number_of_results"]
     number_of_pop_results = config["number_of_pop_results"]
 
-    fout_hap_haplo, fout_pop_haplo, fout_hap_muug, fout_pop_muug = "", "", "", ""
+    fout_hap_haplo = fout_pop_haplo = fout_hap_muug = fout_pop_muug = None
 
     if haps_output:
         fout_hap_haplo = open(path_pmug, "w")
@@ -312,11 +312,13 @@ def change_output_by_extra_gl(
                 haps_output,
             )
 
-    if MUUG_output:
+    if fout_hap_muug is not None:
         fout_hap_muug.close()
+    if fout_pop_muug is not None:
         fout_pop_muug.close()
-    if haps_output:
+    if fout_hap_haplo is not None:
         fout_hap_haplo.close()
+    if fout_pop_haplo is not None:
         fout_pop_haplo.close()
     miss.close()
 
