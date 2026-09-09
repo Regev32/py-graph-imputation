@@ -12,6 +12,7 @@ import json
 
 
 import numpy as np
+from ..filter_by_rest import finalize_results
 from .cutils import open_ambiguities, create_hap_list, deepcopy_list
 from .cypher_plan_b import CypherQueryPlanB
 from .cypher_query import CypherQuery
@@ -130,9 +131,23 @@ def clean_up_gl(gl):
 # amount of RAM.
 _worker_imputation = None
 _worker_impute_args = None
+# What the workers need to finish a subject off themselves - the number of
+# results to keep and where `don.umug` comes from. None means the extra-GL
+# filtering runs after the imputation instead, the way it always did.
+_worker_finalize_args = None
 
 SubjectTask = namedtuple(
-    "SubjectTask", ("index", "subject_id", "gl", "binary", "race1", "race2", "line")
+    "SubjectTask",
+    (
+        "index",
+        "subject_id",
+        "gl",
+        "binary",
+        "race1",
+        "race2",
+        "line",
+        "extra_gl",
+    ),
 )
 
 SubjectResult = namedtuple(
@@ -148,6 +163,7 @@ SubjectResult = namedtuple(
         "option_2",
         "time_taken",
         "failed",
+        "missed_extra_gl",
     ),
 )
 
@@ -157,15 +173,16 @@ OutputWriters = namedtuple(
 )
 
 
-def publish_worker_state(imputation, impute_args):
+def publish_worker_state(imputation, impute_args, finalize_args=None):
     """Make `imputation` the instance the workers impute with.
 
     Must be called before the pool is created - the workers pick this up by
     inheriting the module's globals across the fork, not through pickling.
     """
-    global _worker_imputation, _worker_impute_args
+    global _worker_imputation, _worker_impute_args, _worker_finalize_args
     _worker_imputation = imputation
     _worker_impute_args = impute_args
+    _worker_finalize_args = finalize_args
 
 
 def impute_one_subject(task):
@@ -186,6 +203,7 @@ def impute_one_subject(task):
     start = timeit.default_timer()
     res_muugs = res_haps = None
     failed = False
+    missed_extra_gl = False
     try:
         _, res_muugs, res_haps = imputation.impute_one(
             task.subject_id,
@@ -201,6 +219,23 @@ def impute_one_subject(task):
             planb,
             em,
         )
+        # Filter by the loci held aside from the input while the whole
+        # candidate set is still here: cutting to `number_of_results` first
+        # throws away answers that were ranked below the cut but consistent
+        # with the donor's real typing.
+        if (
+            _worker_finalize_args is not None
+            and res_muugs is not None
+            and res_haps is not None
+        ):
+            number_of_results, umug_from_full_results = _worker_finalize_args
+            res_muugs, res_haps, missed_extra_gl = finalize_results(
+                res_muugs,
+                res_haps,
+                task.extra_gl,
+                number_of_results,
+                umug_from_full_results,
+            )
     except Exception:
         failed = True
 
@@ -215,6 +250,7 @@ def impute_one_subject(task):
         option_2=imputation.option_2,
         time_taken=timeit.default_timer() - start,
         failed=failed,
+        missed_extra_gl=missed_extra_gl,
     )
 
 
@@ -2138,12 +2174,14 @@ class Imputation(object):
 
         return subject_id, res_muugs, res_haps
 
-    def subject_tasks(self, lines, f_bin, f_bin_exist, problem):
+    def subject_tasks(self, lines, f_bin, f_bin_exist, problem, extra_gl_by_id=None):
         """Turn the input file into one `SubjectTask` per subject.
 
         Runs in the parent, so the tasks handed to the workers are nothing but a
         handful of small strings - the graph they are imputed against is already
-        in every worker.
+        in every worker. `extra_gl_by_id` holds the loci `filter_top_3` took out
+        of the input, keyed by subject id, so each worker can check its own
+        results against them.
         """
         for i, name_gl in enumerate(lines):
             name_gl = name_gl.rstrip()  # remove trailing whitespace
@@ -2168,6 +2206,10 @@ class Imputation(object):
                 problem.write(str(name_gl) + "\n")
                 continue
 
+            extra_gl = ""
+            if extra_gl_by_id is not None:
+                extra_gl = extra_gl_by_id.get(str(subject_id), "")
+
             yield SubjectTask(
                 index=i,
                 subject_id=subject_id,
@@ -2176,6 +2218,7 @@ class Imputation(object):
                 race1=race1,
                 race2=race2,
                 line=name_gl,
+                extra_gl=extra_gl,
             )
 
     def write_subject_result(self, result, writers, config, em_mr):
@@ -2194,9 +2237,10 @@ class Imputation(object):
             writers.problem.write(str(i) + "," + str(subject_id) + "\n")
             return
 
-        if (len(res_haps["Haps"]) == 0 or res_haps["Haps"] == "NaN") and len(
-            res_muugs["Haps"]
-        ) == 0:
+        if result.missed_extra_gl or (
+            (len(res_haps["Haps"]) == 0 or res_haps["Haps"] == "NaN")
+            and len(res_muugs["Haps"]) == 0
+        ):
             writers.miss.write(str(i) + "," + str(subject_id) + "\n")
 
         if haps_output:
@@ -2266,7 +2310,13 @@ class Imputation(object):
             )
 
     def impute_file(
-        self, config, planb=None, em_mr=False, em=False, processes=None
+        self,
+        config,
+        planb=None,
+        em_mr=False,
+        em=False,
+        processes=None,
+        extra_gl_by_id=None,
     ):  ##em
         """Impute every subject in the input file.
 
@@ -2274,6 +2324,10 @@ class Imputation(object):
         in this process, more than 1 forks that many workers off this one, and 0
         forks one per core. The workers all impute against the graph this
         process already holds, so adding workers costs cores rather than memory.
+
+        Passing `extra_gl_by_id` moves the extra-GL filtering into the workers,
+        where it runs on the full candidate set before it is cut down to
+        `number_of_results`, and there is no post-imputation pass to run.
         """
         priority = config["priority"]
         MUUG_output = config["output_MUUG"]
@@ -2291,10 +2345,19 @@ class Imputation(object):
         if self.verbose:
             self.logger.info("Starting Imputation!")
 
+        finalize_args = None
+        if extra_gl_by_id is not None:
+            finalize_args = (
+                config["number_of_results"],
+                config.get("umug_from_full_results", False),
+            )
+
         # Has to happen before the fork below: this is how the workers get hold
         # of the graph without anyone pickling it.
         publish_worker_state(
-            self, (priority, epsilon, n, MUUG_output, haps_output, planb, em)
+            self,
+            (priority, epsilon, n, MUUG_output, haps_output, planb, em),
+            finalize_args,
         )
 
         # Fork the workers before any output file is opened, so that no worker
@@ -2344,7 +2407,7 @@ class Imputation(object):
                 problem=problem,
             )
 
-            tasks = self.subject_tasks(f, f_bin, f_bin_exist, problem)
+            tasks = self.subject_tasks(f, f_bin, f_bin_exist, problem, extra_gl_by_id)
             if pool is None:
                 results = map(impute_one_subject, tasks)
             else:

@@ -46,6 +46,7 @@ def run_impute(
     hap_pop_pair=False,
     graph=None,
     processes=None,
+    extra_gl_by_id=None,
 ):
     configuration_file = conf_file
 
@@ -134,6 +135,11 @@ def run_impute(
         "processes": (
             processes if processes is not None else json_conf.get("processes", 1)
         ),
+        # Where `don.umug` comes from once the extra-GL filter runs inside the
+        # imputation: False derives it from the top `number_of_results` pairs,
+        # the way the post-imputation pass did, True from the full filtered
+        # aggregation.
+        "umug_from_full_results": json_conf.get("umug_from_full_results", False),
     }
 
     # Display the configurations we are using
@@ -191,6 +197,11 @@ def run_impute(
         print("\tNodes in plan A: {}".format(config["nodes_for_plan_A"]))
     print("\tSave space mode: {}".format(config["save_mode"]))
     print("\tProcesses: {}".format(config["processes"]))
+    if extra_gl_by_id is not None:
+        print(
+            "\tFiltering by extra GL before truncation, UMUG from full "
+            "results: {}".format(config["umug_from_full_results"])
+        )
     print(
         "****************************************************************************************************"
     )
@@ -215,7 +226,7 @@ def run_impute(
     pathlib.Path(output_dir).mkdir(parents=False, exist_ok=True)
 
     # Write out the results from imputation
-    imputation.impute_file(config, em_mr=hap_pop_pair)
+    imputation.impute_file(config, em_mr=hap_pop_pair, extra_gl_by_id=extra_gl_by_id)
 
     # Profiler end
     # pr.disable()

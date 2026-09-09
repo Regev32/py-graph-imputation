@@ -30,9 +30,17 @@ def run_original_grim(
     `processes` is how many subjects to impute at a time - 1 for a single
     process, 0 for one worker per core. Whatever the count, the workers all
     impute against the same graph, which is built once here.
+
+    With `dominant3`, the loci `change_donor_file` holds aside are checked
+    inside the imputation, against the full candidate set. Setting
+    `filter_extra_gl_before_truncation` to false in the configuration puts that
+    check back where it was - a pass over `don.pmug` after the imputation, by
+    which point the candidates have already been cut to `number_of_results`.
     """
     with open(path_configuration, "r") as f:
         config = json.load(f)
+
+    filter_before_truncation = config.get("filter_extra_gl_before_truncation", True)
 
     # first step in py-graph-imputation
     if Producehpf:
@@ -47,16 +55,27 @@ def run_original_grim(
         graph_freqs(conf_file=path_configuration)
 
     # changing donor file to 3 most imporatnt gls and returning short_gl,extra_gl for each row in donor
+    extra_gl_by_id = None
     if dominant3:
         path_donor = config["imputation_in_file"]
 
         gls, lines = change_donor_file(path_donor)  # change so wont change donor file
+
+        if filter_before_truncation:
+            # Hand the held-aside loci to the imputation, which checks its own
+            # results against them before it truncates and so needs no pass
+            # afterwards.
+            extra_gl_by_id = {
+                str(subject_id): gls["extra_gl"][idx]
+                for idx, subject_id in enumerate(gls["subject_id"])
+            }
 
     # imputation
     impute(
         conf_file=path_configuration,
         hap_pop_pair=hap_pop_pair,
         processes=processes,
+        extra_gl_by_id=extra_gl_by_id,
     )
 
     # change the output and filter by the extra_gl
@@ -77,9 +96,16 @@ def run_original_grim(
             config["imputation_out_path"], config["imputation_out_miss_filename"]
         )
 
-        change_output_by_extra_gl(
-            config, gls, path_pmug, path_umug, path_umug_pops, path_pmug_pops, path_miss
-        )  # filter reasults in our origianl file, add miss to existing miss
+        if not filter_before_truncation:
+            change_output_by_extra_gl(
+                config,
+                gls,
+                path_pmug,
+                path_umug,
+                path_umug_pops,
+                path_pmug_pops,
+                path_miss,
+            )  # filter reasults in our origianl file, add miss to existing miss
 
         # changing to original donor file
         with open(path_donor, "w") as file:
