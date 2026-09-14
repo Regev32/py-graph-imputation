@@ -23,13 +23,12 @@ def run_original_grim(
     hap_pop_pair=True,
     Producehpf=False,
     dominant3=True,
-    processes=None,
 ):
     """Run the whole GRIM pipeline off `path_configuration`.
 
-    `processes` is how many subjects to impute at a time - 1 for a single
-    process, 0 for one worker per core. Whatever the count, the workers all
-    impute against the same graph, which is built once here.
+    `num_processes` in the configuration is how many subjects to impute at a
+    time - 1 (the default) for a single process. Whatever the count, the
+    workers all impute against the same graph, which is built once here.
 
     With `dominant3`, the loci `change_donor_file` holds aside are checked
     inside the imputation, against the full candidate set. Setting
@@ -74,7 +73,6 @@ def run_original_grim(
     impute(
         conf_file=path_configuration,
         hap_pop_pair=hap_pop_pair,
-        processes=processes,
         extra_gl_by_id=extra_gl_by_id,
     )
 
@@ -115,14 +113,20 @@ def run_original_grim(
 
 
 class Impute_for_em(object):
-
-    def __init__(self,  config=None, graph = None, count_by_prob=None,):
+    def __init__(
+        self,
+        config=None,
+        graph=None,
+        count_by_prob=None,
+    ):
         self.imputation = Imputation(graph, config, count_by_prob)
 
     def impute_for_em(self, config, planb, em_mr, em=True, dominant3=True):
         if dominant3:
             path_donor = config["imputation_input_file"]
-            gls, lines = change_donor_file(path_donor)  # change so wont change donor file
+            gls, lines = change_donor_file(
+                path_donor
+            )  # change so wont change donor file
 
         # imputation
         self.imputation.impute_file(config, planb, True, em)

@@ -254,21 +254,8 @@ def impute_one_subject(task):
     )
 
 
-def process_count(processes):
-    """Resolve the configured number of processes to an actual worker count.
-
-    0 (or less) means "one worker per core"; 1 means no pool at all.
-    """
-    if processes is None:
-        return 1
-    processes = int(processes)
-    if processes <= 0:
-        return os.cpu_count() or 1
-    return processes
-
-
-def fork_pool(processes):
-    """Open a pool of `processes` workers that share this process' graph.
+def fork_pool(config):
+    """Open a pool of the configured number of workers, sharing this process' graph.
 
     Returns None if the platform cannot fork, leaving the caller to impute in a
     single process: the other start methods would send each worker a pickled
@@ -284,7 +271,9 @@ def fork_pool(processes):
     # the shared graph into each worker a page at a time. Freezing moves what is
     # alive now - the graph included - to a generation the collector leaves alone.
     gc.freeze()
-    return multiprocessing.get_context("fork").Pool(processes=processes)
+    return multiprocessing.get_context("fork").Pool(
+        processes=config.get("num_processes", 1)
+    )
 
 
 def imap_bounded(pool, func, iterable, max_in_flight):
@@ -2315,14 +2304,13 @@ class Imputation(object):
         planb=None,
         em_mr=False,
         em=False,
-        processes=None,
         extra_gl_by_id=None,
     ):  ##em
         """Impute every subject in the input file.
 
-        `processes` is how many subjects to impute at a time: 1 keeps everything
-        in this process, more than 1 forks that many workers off this one, and 0
-        forks one per core. The workers all impute against the graph this
+        `config["num_processes"]` is how many subjects to impute at a time: 1 (the
+        default) keeps everything in this process, and more than 1 forks that
+        many workers off this one. The workers all impute against the graph this
         process already holds, so adding workers costs cores rather than memory.
 
         Passing `extra_gl_by_id` moves the extra-GL filtering into the workers,
@@ -2337,9 +2325,7 @@ class Imputation(object):
         # planb = config["planb"]#em
         if planb is None:  # em
             planb = config["planb"]  # em
-        if processes is None:
-            processes = config.get("processes", 1)
-        processes = process_count(processes)
+        processes = config.get("num_processes", 1)
 
         # TODO: do the right thing if its a gzip
         if self.verbose:
@@ -2364,7 +2350,7 @@ class Imputation(object):
         # ends up holding a handle on a file the parent is writing.
         pool = None
         if processes > 1:
-            pool = fork_pool(processes)
+            pool = fork_pool(config)
             if pool is None:
                 processes = 1
             else:

@@ -45,7 +45,6 @@ def run_impute(
     project_dir_in_file="",
     hap_pop_pair=False,
     graph=None,
-    processes=None,
     extra_gl_by_id=None,
 ):
     configuration_file = conf_file
@@ -132,9 +131,7 @@ def run_impute(
         "graph_path": json_conf.get("graph_path", "graph.pkl"),
         # How many subjects to impute at a time. The workers share this
         # process' graph, so this is a question of cores, not of memory.
-        "processes": (
-            processes if processes is not None else json_conf.get("processes", 1)
-        ),
+        "num_processes": json_conf.get("num_processes", 1),
         # Where `don.umug` comes from once the extra-GL filter runs inside the
         # imputation: False derives it from the top `number_of_results` pairs,
         # the way the post-imputation pass did, True from the full filtered
@@ -196,7 +193,7 @@ def run_impute(
     if config["nodes_for_plan_A"]:
         print("\tNodes in plan A: {}".format(config["nodes_for_plan_A"]))
     print("\tSave space mode: {}".format(config["save_mode"]))
-    print("\tProcesses: {}".format(config["processes"]))
+    print("\tProcesses: {}".format(config["num_processes"]))
     if extra_gl_by_id is not None:
         print(
             "\tFiltering by extra GL before truncation, UMUG from full "

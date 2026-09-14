@@ -55,7 +55,7 @@ def graph_freqs(conf_file="", for_em=False, em_pop=None):
     )
 
 
-def impute(conf_file="", hap_pop_pair=False, processes=None, extra_gl_by_id=None):
+def impute(conf_file="", hap_pop_pair=False, extra_gl_by_id=None):
     project_dir_in_file, project_dir_graph = "", ""
     if conf_file == "":
         conf_file = (
@@ -86,7 +86,6 @@ def impute(conf_file="", hap_pop_pair=False, processes=None, extra_gl_by_id=None
         project_dir_in_file,
         hap_pop_pair,
         graph,
-        processes,
         extra_gl_by_id=extra_gl_by_id,
     )
 
